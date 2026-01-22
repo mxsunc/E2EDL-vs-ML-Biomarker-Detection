@@ -1,3 +1,6 @@
-This repository is an updated version of https://github.com/BarasLab/ATGC/tree/method_paper. We applied its multiple instance learning model (MIL) on sometic mutations to predict oncological biomarkers, such as microsatellite instability and homologous recombination deficiency. Furthermore, we compared it to a classical machine learning (ML) model. Results showed that MIL outperformed the ML model, especially when applying to sparse data.
+This repository contains the code used for our study comparing end-to-end deep learning (DL) and feature-based machine learning (ML) approaches for genomic biomarker prediction from tumour sequencing data across exome-wide and targeted-panel settings. It extends the ATGC multiple instance learning (MIL) framework for somatic small variants and adds multimodal modelling with gene-level copy-number features, calibration utilities, and interpretation workflows used to generate manuscript figures and tables.
 
-The results can be found under: https://www.biorxiv.org/content/10.1101/2025.01.06.631471v1
+The MIL implementation is based on the ATGC codebase (https://github.com/BarasLab/ATGC) and has been adapted for MSI and HRD prediction, evaluation across pseudo-panels and real panel cohorts, and direct comparison to ML baselines. The CNV encoder component was inspired by recent sequence-modeling work on RNA profiles (https://www.biorxiv.org/content/10.1101/2024.06.18.599483v4
+).
+
+The corresponding manuscript results are available at: https://www.biorxiv.org/content/10.1101/2025.01.06.631471v1
