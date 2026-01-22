@@ -26,3 +26,16 @@ def make_balanced_ds(X_arr, y_arr, batch_size=64, shuffle_buffer=10_000):
 
     return (merged.map(_merge, num_parallel_calls=AUTOTUNE)
                    .prefetch(AUTOTUNE))
+
+def make_balanced(sub_df):
+        pos = sub_df[sub_df["HRD_status"] == 1]
+        neg = sub_df[sub_df["HRD_status"] == 0]
+        if len(pos) == 0 or len(neg) == 0:
+            raise ValueError("No positive or negative samples in split.")
+        neg_res = neg.sample(
+            n=len(pos),
+            random_state=random_state,
+            replace=False,
+        )
+        out = pd.concat([pos, neg_res], axis=0)
+        return out.sample(frac=1.0, random_state=random_state)

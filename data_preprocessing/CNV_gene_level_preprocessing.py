@@ -5,7 +5,7 @@ import pandas as pd
 import pyranges as pr
 #%%
 # generate lookup table for genes
-gtf_file = ".../gencode.v38.annotation.gtf" # gencode v38 genome annotations
+gtf_file = ".../gencode.v38.annotation.gtf"
 
 genes = []
 with open(gtf_file) as f:
@@ -35,15 +35,12 @@ with open(gtf_file) as f:
 
 genes_df = pd.DataFrame(genes, columns=["Chromosome", "Start", "End", "Gene", "GeneType"])
 
-# sort out genes
 genes_df = genes_df[genes_df["GeneType"] == "protein_coding"]
 genes_df = genes_df[~genes_df["Gene"].str.startswith("MT-")]
-
-# convert to pyranges
 genes_pr = pr.PyRanges(genes_df)
 #%%
 # load metadata
-base_dir = ".../gdc_sample_sheet.tsv" # GDC samples
+base_dir = ".../gdc_sample_sheet.tsv"
 
 sample_sheet = pd.read_csv(base_dir, sep="\t")
 
@@ -56,7 +53,7 @@ for patient_id, group in sample_sheet.groupby("patient_id"):
 final_df = pd.DataFrame(selected_rows).reset_index(drop=True)
 #%%
 # load segments
-seg_folder = "..." # TCGA CNV segment files 
+seg_folder = "..." # TCGA CNV segment folder, file per patient 
 
 output = {}
 for file in os.listdir(seg_folder):
