@@ -1,8 +1,8 @@
 import numpy as np
 import tensorflow as tf
-from model.Sample_MIL import InstanceModels, RaggedModels
-from model.KerasLayers import Losses, Metrics
-from model import DatasetsUtils
+from mutationMIL.Sample_MIL import InstanceModels, RaggedModels
+from mutationMIL.KerasLayers import Losses, Metrics
+from mutationMIL import DatasetsUtils
 import pandas as pd
 import pickle
 physical_devices = tf.config.experimental.list_physical_devices('GPU')
