@@ -84,7 +84,7 @@ class BulkCNVBertEncoder2(tf.keras.Model):
         dropout_rate: float = 0.1,
         use_pos_enc: bool = False,
         use_gene_emb: bool = True,
-        pretrained_gene_embeddings=None,
+        pretrained_gene_embeddings=None,   # np.ndarray shape (n_genes, d_pre)
         freeze_gene_emb: bool = False,
         **kwargs,
     ):

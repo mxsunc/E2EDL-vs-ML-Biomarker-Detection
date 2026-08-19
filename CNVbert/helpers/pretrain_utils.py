@@ -3,9 +3,20 @@ import tensorflow as tf
 import math
 from tensorflow.keras.utils import Sequence
 
-IGNORE_IDX = -100
-
 def apply_fixed_mask(tokens, mask_token_id, mask_ratio=0.15):
+    """
+    Masks exactly `mask_ratio` of tokens per sample (excluding CLS).
+    
+    Args:
+        tokens: (batch_size, seq_len) int32 array
+        mask_token_id: int, token to replace with
+        mask_ratio: float, e.g., 0.15
+        
+    Returns:
+        input_tokens: same shape, with masked values
+        mask: bool mask of where tokens were masked
+        labels: original values, or -100 for ignored
+    """
     input_tokens = tokens.copy()
     labels = np.full_like(tokens, fill_value=-100)
     mask = np.zeros_like(tokens, dtype=bool)
@@ -23,15 +34,32 @@ def apply_fixed_mask(tokens, mask_token_id, mask_ratio=0.15):
 
     return input_tokens, mask, labels
 
+
 def apply_random_mask(tokens, mask_token_id, mask_ratio=0.15):
+    """
+    Randomly masks input tokens.
+    Args:
+        tokens: (batch_size, seq_len)
+        mask_token_id: int, ID to replace with
+    Returns:
+        masked_tokens: (batch_size, seq_len)
+        mask_positions: boolean mask where tokens were masked
+        labels: original token IDs (used as ground truth)
+    """
     input_tokens = tokens.copy()
     labels = tokens.copy()
     mask_positions = np.random.rand(*tokens.shape) < mask_ratio
+
+    # Avoid masking the CLS token (first position)
     mask_positions[:, 0] = False
+
     input_tokens[mask_positions] = mask_token_id
-    labels[~mask_positions] = -100
+    labels[~mask_positions] = -100  # ignore index
 
     return input_tokens, mask_positions, labels
+
+
+IGNORE_IDX = -100
 
 class MaskedTokenAccuracy(tf.keras.metrics.Metric):
     def __init__(self, name="acc", **kwargs):
@@ -40,9 +68,10 @@ class MaskedTokenAccuracy(tf.keras.metrics.Metric):
         self.total   = self.add_weight(name="total",   initializer="zeros", dtype=tf.float32)
 
     def update_state(self, y_true, y_pred, sample_weight=None):
+        # y_pred: (B, L, V) logits; y_true: (B, L) int with -100 ignored
         y_true = tf.cast(y_true, tf.int32)
-        mask   = tf.not_equal(y_true, IGNORE_IDX)
-        pred   = tf.argmax(y_pred, axis=-1, output_type=tf.int32)
+        mask   = tf.not_equal(y_true, IGNORE_IDX)                 # (B, L)
+        pred   = tf.argmax(y_pred, axis=-1, output_type=tf.int32) # (B, L)
         y_true_masked = tf.boolean_mask(y_true, mask)
         pred_masked   = tf.boolean_mask(pred,   mask)
         correct = tf.reduce_sum(tf.cast(tf.equal(y_true_masked, pred_masked), tf.float32))
@@ -66,10 +95,12 @@ class MaskedTopKAccuracy(tf.keras.metrics.Metric):
 
     def update_state(self, y_true, y_pred, sample_weight=None):
         y_true = tf.cast(y_true, tf.int32)
-        mask   = tf.not_equal(y_true, IGNORE_IDX)
+        mask   = tf.not_equal(y_true, IGNORE_IDX)             # (B, L)
+        # top-k: (B, L, k)
         topk = tf.math.top_k(y_pred, k=self.k).indices
-        y_true_exp = tf.expand_dims(y_true, axis=-1)
-        in_topk = tf.reduce_any(tf.equal(topk, y_true_exp), axis=-1)
+        # broadcast true labels to compare against topk
+        y_true_exp = tf.expand_dims(y_true, axis=-1)          # (B, L, 1)
+        in_topk = tf.reduce_any(tf.equal(topk, y_true_exp), axis=-1)  # (B, L)
         in_topk = tf.boolean_mask(in_topk, mask)
         correct = tf.reduce_sum(tf.cast(in_topk, tf.float32))
         total   = tf.cast(tf.size(in_topk), tf.float32)
@@ -123,9 +154,11 @@ class WarmupCosine(tf.keras.optimizers.schedules.LearningRateSchedule):
         T = tf.cast(self.total_steps, tf.float32)
 
         def lr_warmup():
+            # linear warmup from 0 -> base_lr
             return self.base_lr * (step / tf.maximum(w, 1.0))
 
         def lr_cosine():
+            # cosine decay from base_lr -> min_lr
             t = (step - w) / tf.maximum(T - w, 1.0)
             cos_decay = 0.5 * (1.0 + tf.cos(math.pi * tf.minimum(1.0, t)))
             return self.min_lr + (self.base_lr - self.min_lr) * cos_decay
@@ -138,22 +171,34 @@ class WarmupCosine(tf.keras.optimizers.schedules.LearningRateSchedule):
 
 
 
+
 def mask_once(x_tokens, mask_id, mask_ratio, special_ids=(0,), force_min_one=True, rng=None):
+    """
+    x_tokens: (L,) int32. Returns (masked_tokens, labels).
+    - Labels are -100 except at masked positions, where labels = original token.
+    - Excludes positions whose token is in special_ids (e.g., PAD=0, CLS).
+    """
     if rng is None:
         rng = np.random.default_rng()
     L = x_tokens.shape[0]
+
+    # candidates: not specials
     specials = np.zeros(L, dtype=bool)
     if special_ids:
         for sid in special_ids:
             specials |= (x_tokens == sid)
     cand_idx = np.where(~specials)[0]
     if cand_idx.size == 0 or mask_ratio <= 0.0:
+        # no masking
         return x_tokens.copy(), np.full(L, -100, dtype=np.int32)
+
     k = int(round(mask_ratio * cand_idx.size))
     if force_min_one:
         k = max(1, k)
     k = min(k, cand_idx.size)
+
     chosen = rng.choice(cand_idx, size=k, replace=False)
+
     masked = x_tokens.copy()
     labels = np.full(L, -100, dtype=np.int32)
     labels[chosen] = x_tokens[chosen]
@@ -164,6 +209,10 @@ class MaskingSequence(Sequence):
     def __init__(self, X_tokens, gene_ids, batch_size, mask_id,
                  start_ratio=0.05, end_ratio=0.15, warmup_epochs=2,
                  special_ids=(), shuffle=True, seed=42):
+        """
+        X_tokens: (N, L), gene_ids: (N, L)
+        Mask ratio increases linearly over first `warmup_epochs` epochs.
+        """
         self.X_tokens = X_tokens
         self.gene_ids = gene_ids
         self.N = X_tokens.shape[0]
@@ -204,6 +253,7 @@ class MaskingSequence(Sequence):
         Xb = self.X_tokens[batch_ix]
         Gb = self.gene_ids[batch_ix]
         B = Xb.shape[0]
+
         masked_b = np.empty_like(Xb)
         labels_b = np.full_like(Xb, fill_value=-100)
         for i in range(B):

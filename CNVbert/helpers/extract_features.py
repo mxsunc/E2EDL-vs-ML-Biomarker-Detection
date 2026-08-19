@@ -1,5 +1,5 @@
 import tensorflow as tf
-import from tqdm import tqdm
+from tqdm import tqdm
 import numpy as np
 import pandas as pd
 

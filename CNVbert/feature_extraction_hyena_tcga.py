@@ -1,127 +1,109 @@
-import numpy as np
+#%%
+"""
+Extract CNV Hyena embeddings (TCGA) - 128-dim mean-pooled.
+
+Tokenizes the integer CNV matrix with CNVTokenizerLinear (9 linear bins) and
+runs the pretrained BulkCNVHyenaEncoder (embed_dim=128) to produce per-sample
+embeddings.
+
+Output:
+- embeddings/cnv_int_hyena_{method}_embeddings_tcga_128.csv
+"""
+
+import os
 import pickle
-from tqdm import tqdm
+import numpy as np
 import pandas as pd
 import tensorflow as tf
-from cnv_tokenizer import CNVTokenizer2 as CNVTokenizer
-from bulk_cnv_hyena_encoder import BulkCNVHyenaEncoder
-from helpers.extract_features_hyena import extract_cnv_features_hyena
-from helpers.pretrain_utils import apply_fixed_mask
+from tqdm import tqdm
 
-# load data
-input_path = ".../tcga_cnv_seg_matrix.tsv"
-all_cancers_df = pd.read_csv(input_path, sep="\t")
-all_cancers_df = all_cancers_df.set_index("patient_id")
+from cnv_tokenizer import CNVTokenizerLinear
+from bulk_cnv_hyena_encoder import BulkCNVHyenaEncoder
+from helpers.extract_features import extract_cnv_features_hyena
+
+physical_devices = tf.config.experimental.list_physical_devices('GPU')
+if len(physical_devices) > 0:
+    tf.config.experimental.set_memory_growth(physical_devices[-1], True)
+    tf.config.experimental.set_visible_devices(physical_devices[-1], 'GPU')
+    print(f"Using GPU: {physical_devices[-1]}")
+else:
+    print("No GPU available, running on CPU")
+
+CNV_INT_PATH = ".../all_cancers_cnv_matrix_int.csv"
+GENE_POS_PATH = ".../CNV_pos.csv"
+WEIGHTS_PATH = ".../cnv_int_hyenaencoder_weights_128.pkl"
+OUT_DIR = ".../embeddings"
+os.makedirs(OUT_DIR, exist_ok=True)
+
+METHOD = "mean"
+
+print("Loading TCGA integer CNV...")
+all_cancers_df = pd.read_csv(CNV_INT_PATH, index_col="sample_barcode")
 all_cancers_df = all_cancers_df[~all_cancers_df.index.duplicated(keep="first")].copy()
 all_cancers_df["bcr_patient_barcode"] = all_cancers_df.index
 
-# load gene positions
-gene_pos_df = pd.read_csv(".../CNV_pos_embeddings_100k.csv")
-chrom_order = {**{str(i): i for i in range(1,23)}, "X": 23, "Y": 24, "MT": 25}
+gene_pos_df = pd.read_csv(GENE_POS_PATH)
 genes_ordered = gene_pos_df["gene"].tolist()
 
-# sort columns by gene positions
-shared = [g for g in genes_ordered if g in all_cancers_df.columns]
-X_all = X_all.loc[:, shared].copy()
+pos_map = dict(zip(gene_pos_df["gene"], gene_pos_df["global_bin_id"]))
+shared_genes = sorted(
+    [g for g in genes_ordered if g in all_cancers_df.columns],
+    key=lambda g: pos_map[g],
+)
+print(f"Using {len(shared_genes)} genes (full set, genome-ordered)")
+
+X_all = all_cancers_df[shared_genes].copy()
+print(f"TCGA integer CNV matrix: {X_all.shape}")
 
 gene_to_pos = dict(zip(gene_pos_df["gene"], gene_pos_df["global_bin_id"]))
-pos_ids = [gene_to_pos[gene] for gene in shared]
+pos_ids = [gene_to_pos[gene] for gene in shared_genes]
 n_pos_bins = max(pos_ids) + 1
 
-gene_to_pos = dict(zip(gene_pos_df["gene"], gene_pos_df["global_bin_id"]))
-pos_ids = [gene_to_pos[gene] for gene in shared]
-n_pos_bins = max(pos_ids) + 1
-n_genes = len(shared)
+L = len(shared_genes)
+SEQ_LEN = L + 1
 
-# set parameters
-N_BINS = 64
-L = len(X_all.columns) 
-SEQ_LEN = len(X_all.columns) +1
-BATCH_SIZE = 1
-EPOCHS = 10
-vocab_size = 67
-L_real  = SEQ_LEN - 1
-CLS_GENE_ID = L_real
-
-# tokenize
-tokenizer = CNVTokenizer(n_bins=64, prepend_cls_token=True, reserve_mask_token=True)
-tokenizer.fit(X_all)
-
-X_all_tokens = tokenizer.batch_tokenize(np.array(X_all))
-
+tokenizer = CNVTokenizerLinear(
+    n_bins=9, min_cnv_value=-2.0, max_cnv_value=2.0,
+    prepend_cls_token=True, reserve_mask_token=True,
+)
 vocab_size = tokenizer.get_vocab_size()
-CLS_ID     = tokenizer.cls_id
-MASK_ID    = tokenizer.mask_id 
+print(f"vocab_size={vocab_size}, CLS={tokenizer.cls_id}, MASK={tokenizer.mask_id}")
 
-mask_token_id = tokenizer.mask_id if hasattr(tokenizer, "mask_id") else tokenizer.get_vocab_size()  
-masked_tokens, mask, labels = apply_fixed_mask(X_all_tokens, mask_token_id, mask_ratio=0.3)
+X_tokens_all = tokenizer.batch_tokenize(np.asarray(X_all))
 
-cls_position_id = 0
-pos_ids_with_cls = [cls_position_id] + pos_ids
-
-position_ids = np.tile(pos_ids_with_cls, (X_all.shape[0], 1))
-
-gene2idx = {g:i for i,g in enumerate(genes_ordered)}
+gene2idx = {g: i for i, g in enumerate(genes_ordered)}
 CLS_GENE_ID = len(genes_ordered)
-gene_ids_row_subset = np.array([CLS_GENE_ID] + [gene2idx[g] for g in shared], dtype=np.int32)
-gene_ids = np.broadcast_to(gene_ids_row_subset, (len(X_all), len(shared)+1))
+gene_ids_row_subset = np.array([CLS_GENE_ID] + [gene2idx[g] for g in shared_genes], dtype=np.int32)
+gene_ids_all = np.broadcast_to(gene_ids_row_subset, X_tokens_all.shape).astype(np.int32)
 
-# load hyena model
+print("Building encoder and loading weights...")
 encoder = BulkCNVHyenaEncoder(
-    n_genes=SEQ_LEN,
-    vocab_size=tokenizer.get_vocab_size() + 1,
-    embed_dim=512,
-    num_layers=2,
-    filter_len=8192,
-    expand=3,
-    dropout_rate=0.4,
-    use_pos_enc=False,
-    use_gene_emb=True,
-    name="cnv_hyena_encoder"
+    n_genes=SEQ_LEN, vocab_size=vocab_size, embed_dim=128,
+    num_layers=2, filter_len=412, expand=3, dropout_rate=0.4,
+    use_pos_enc=False, use_gene_emb=True, name="cnv_hyena_encoder",
 )
 
-with open("/weights/cnv_seq_hyenaencoder_weights_512.pkl", "rb") as f:
-    weights = pickle.load(f)
-
-# extract features
 dummy_tokens = tf.zeros((1, SEQ_LEN), dtype=tf.int32)
-dummy_gene_ids_row = np.concatenate([[CLS_GENE_ID], np.arange(L_real, dtype=np.int32)])
-dummy_gene_ids = tf.constant(dummy_gene_ids_row[None, :], dtype=tf.int32)
-use_pos_enc = getattr(encoder, "use_pos_enc", False)
-if use_pos_enc:
-    dummy_pos = tf.range(SEQ_LEN, dtype=tf.int32)[None, :]
-    _ = encoder(dummy_tokens, gene_ids=dummy_gene_ids, position_ids=dummy_pos, training=False)
-else:
-    _ = encoder(dummy_tokens, gene_ids=dummy_gene_ids, training=False)
+dummy_gene_ids = tf.constant(gene_ids_row_subset[None, :], dtype=tf.int32)
+_ = encoder(dummy_tokens, gene_ids=dummy_gene_ids, training=False)
 
+with open(WEIGHTS_PATH, "rb") as f:
+    weights = pickle.load(f)
 encoder.set_weights(weights)
 encoder.trainable = False
+print(f"Loaded weights from {WEIGHTS_PATH}")
 
-X_cnv_all   = np.asarray(Xall)
-X_tokens_all = tokenizer.batch_tokenize(X_cnv_all)
-
-gene_ids_row = np.concatenate([[CLS_GENE_ID], np.arange(L_real, dtype=np.int32)])
-gene_ids_all = np.broadcast_to(gene_ids_row, X_tokens_all.shape).astype(np.int32)
-
-if use_pos_enc:
-    pos_ids_with_cls = np.arange(SEQ_LEN, dtype=np.int32)
-    pos_ids_all = np.broadcast_to(pos_ids_with_cls, X_tokens_all.shape).astype(np.int32)
-else:
-    pos_ids_all = None
-
-me = "cls"  # or "mean"
-sample_names = X_all.index
-
+print("Extracting features...")
+sample_names = X_all.index.tolist()
 cnv_feature_df = extract_cnv_features_hyena(
-    encoder,
-    tokens=X_tokens_all,
-    gene_ids=gene_ids_all,
-    sample_names=sample_names,
-    method=me,
-    batch_size=BATCH_SIZE,
-    pad_id=0
+    encoder, tokens=X_tokens_all, gene_ids=gene_ids_all,
+    sample_names=sample_names, method=METHOD,
+    batch_size=4, pad_id=0,
 )
 
-# save features
-cnv_feature_df["bcr_patient_barcode"] = df_merged_together["bcr_patient_barcode"].values
-cnv_feature_df.to_csv(".../embeddings/cnv_seq_hyena_"+me+"_embeddings_tcga_512.csv")
+cnv_feature_df["bcr_patient_barcode"] = sample_names
+cnv_feature_df = cnv_feature_df.drop_duplicates(subset="bcr_patient_barcode").set_index("bcr_patient_barcode")
+out_path = f"{OUT_DIR}/cnv_int_hyena_{METHOD}_embeddings_tcga_128.csv"
+cnv_feature_df.to_csv(out_path)
+print(f"Saved TCGA embeddings ({cnv_feature_df.shape}) -> {out_path}")
+# %%

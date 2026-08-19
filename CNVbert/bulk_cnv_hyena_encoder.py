@@ -2,11 +2,11 @@ import tensorflow as tf
 from tensorflow.keras import layers
 
 def _next_pow2(n):
+    # n: scalar/int Tensor
     n = tf.cast(tf.maximum(n, 1), tf.int32)
     log2_n = tf.math.log(tf.cast(n, tf.float32)) / tf.math.log(tf.constant(2.0, tf.float32))
-    k = tf.cast(tf.math.ceil(log2_n), tf.int32)
-    return tf.bitwise.left_shift(tf.constant(1, tf.int32), k)
-
+    k = tf.cast(tf.math.ceil(log2_n), tf.int32)               # ceil(log2(n))
+    return tf.bitwise.left_shift(tf.constant(1, tf.int32), k) # 1 << k
 class FFTLongConv1D(layers.Layer):
     """
     Depthwise long convolution via FFT, 'same' padding.
@@ -17,6 +17,7 @@ class FFTLongConv1D(layers.Layer):
         super().__init__(name=name)
         self.D = int(d_model)
         self.K = int(filter_len)
+        # Per-channel real filter. Initialize small.
         self.h = self.add_weight(
             "h", shape=(self.D, self.K),
             initializer=tf.keras.initializers.RandomNormal(stddev=0.02),
@@ -24,28 +25,35 @@ class FFTLongConv1D(layers.Layer):
         )
 
     def call(self, u):
+        # u: (B,L,D) -> (B*D, L)
         u = tf.cast(u, tf.float32)
         B = tf.shape(u)[0]; L = tf.shape(u)[1]; D = tf.shape(u)[2]
-        x = tf.transpose(u, [0, 2, 1])
-        x = tf.reshape(x, [B * D, L])
+        x = tf.transpose(u, [0, 2, 1])                   # (B,D,L)
+        x = tf.reshape(x, [B * D, L])                    # (BD, L)
 
+        # Pad to FFT length
         pad_len = L + self.K - 1
         N = _next_pow2(pad_len)
 
-        x_pad = tf.pad(x, [[0, 0], [0, N - L]])
-        h_pad = tf.pad(self.h, [[0, 0], [0, N - self.K]])
-        h_pad = tf.repeat(h_pad, repeats=B, axis=0)
+        # Zero-pad signals and filters to N
+        x_pad = tf.pad(x, [[0, 0], [0, N - L]])          # (BD, N)
+        h_pad = tf.pad(self.h, [[0, 0], [0, N - self.K]])# (D, N)
+        h_pad = tf.repeat(h_pad, repeats=B, axis=0)      # (BD, N)
 
-        X = tf.signal.rfft(x_pad)
-        H = tf.signal.rfft(h_pad)
+        # FFT, multiply, IFFT
+        X = tf.signal.rfft(x_pad)                        # (BD, N/2+1) complex64
+        H = tf.signal.rfft(h_pad)                        # (BD, N/2+1) complex64
         Y = X * H
-        y_full = tf.signal.irfft(Y, [N])
+        y_full = tf.signal.irfft(Y, [N])                 # (BD, N) real
 
+        # 'same' slice centered: take first L positions aligned as conv1d SAME
+        # For linear conv, same-aligned start = (K-1)//2
         start = (self.K - 1) // 2
-        y = y_full[:, start:start + L]
+        y = y_full[:, start:start + L]                   # (BD, L)
 
+        # Back to (B, L, D)
         y = tf.reshape(y, [B, self.D, L])
-        y = tf.transpose(y, [0, 2, 1])
+        y = tf.transpose(y, [0, 2, 1])                   # (B, L, D)
         return y
 
 class HyenaLiteBlock(layers.Layer):
@@ -57,21 +65,21 @@ class HyenaLiteBlock(layers.Layer):
         self.d = d_model
         self.d_inner = expand * d_model
         self.norm = layers.LayerNormalization(epsilon=1e-6)
-        self.in_proj = layers.Dense(2 * self.d_inner, use_bias=True)
+        self.in_proj = layers.Dense(2 * self.d_inner, use_bias=True)  # to (u, z)
         self.longconv = FFTLongConv1D(self.d_inner, filter_len=filter_len)
         self.dropout = layers.Dropout(dropout)
-        self.out_proj = layers.Dense(d_model, dtype="float32")
+        self.out_proj = layers.Dense(d_model, dtype="float32")        # keep fp32 out
 
     def call(self, x, training=False):
-        h = self.norm(x)
-        u_z = self.in_proj(h)
-        u, z = tf.split(u_z, 2, axis=-1)
+        h = self.norm(x)                                # (B,L,D)
+        u_z = self.in_proj(h)                           # (B,L,2*d_inner)
+        u, z = tf.split(u_z, 2, axis=-1)                # (B,L,Dh), (B,L,Dh)
         z = tf.nn.sigmoid(z)
-        u = self.longconv(u)
+        u = self.longconv(u)                            # (B,L,Dh), O(L log L)
         y = u * z
-        y = self.out_proj(y)
+        y = self.out_proj(y)                            # (B,L,D)
         y = self.dropout(y, training=training)
-        return x + tf.cast(y, x.dtype)
+        return x + tf.cast(y, x.dtype)                  # residual
 
 
 class BulkCNVHyenaEncoder(tf.keras.Model):
@@ -89,6 +97,7 @@ class BulkCNVHyenaEncoder(tf.keras.Model):
         if use_pos_enc:
             self.position_embedding = layers.Embedding(n_pos_bins, embed_dim, embeddings_initializer=init, name="pos_emb")
 
+        # learnable balances
         self.alpha_tok  = self.add_weight("alpha_tok",  shape=(), initializer="ones",  trainable=True)
         self.alpha_gene = self.add_weight("alpha_gene", shape=(), initializer="ones",  trainable=True)
         self.alpha_pos  = self.add_weight("alpha_pos",  shape=(), initializer="zeros", trainable=True)
@@ -111,4 +120,4 @@ class BulkCNVHyenaEncoder(tf.keras.Model):
         x = self.embed_ln(x)
         for blk in self.blocks:
             x = blk(x, training=training)
-        return x
+        return x  # (B,L,D)

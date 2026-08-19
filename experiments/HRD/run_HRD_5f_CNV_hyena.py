@@ -1,17 +1,17 @@
 #%%
 """
-CNV BERT embeddings - 5-Fold CV Prediction Export (Revision)
+CNV Hyena embeddings - 5-Fold CV Prediction Export (Revision)
 
-Trains an MLP on CNV BERT embeddings and exports predictions in a standardized
+Trains an MLP on CNV Hyena embeddings and exports predictions in a standardized
 format for comparison with fusion models.
 
 Uses:
-- 128-dim mean-pooled BERT embeddings as input
+- 128-dim mean-pooled Hyena embeddings as input
 - 5-fold CV splits from HRDfolds{j}.csv
 - scarHRD labels for CPTAC evaluation
 
 Output:
-- predictions_CNV_BERT_int_all_folds.csv: Per-patient predictions for all cohorts
+- predictions_CNV_Hyena_int_all_folds.csv: Per-patient predictions for all cohorts
 """
 
 SEED = 42
@@ -75,7 +75,7 @@ def make_balanced_ds(X_arr, y_arr, batch_size=BATCH_SIZE, shuffle_buffer=10_000)
     return merged.map(_merge, num_parallel_calls=AUTOTUNE).prefetch(AUTOTUNE)
 
 print("Loading TCGA BERT embeddings...")
-tcga_emb_path = ".../cnv_int_bert_mean_embeddings_tcga_128.csv"
+tcga_emb_path = ".../cnv_int_hyena_mean_embeddings_tcga_128.csv"
 tcga_emb_df = pd.read_csv(tcga_emb_path, index_col="bcr_patient_barcode")
 tcga_emb_df = tcga_emb_df[~tcga_emb_df.index.duplicated(keep="first")].copy()
 tcga_emb_df["patient_id"] = tcga_emb_df.index.str[:12]
@@ -83,7 +83,7 @@ tcga_emb_df = tcga_emb_df.drop_duplicates(subset="patient_id").set_index("patien
 emb_cols = [c for c in tcga_emb_df.columns if c.startswith("mean_emb")]
 
 print("Loading CPTAC BERT embeddings...")
-cptac_emb_path = ".../cnv_int_bert_mean_embeddings_cptac_128.csv"
+cptac_emb_path = ".../cnv_int_hyena_mean_embeddings_cptac_128.csv"
 cptac_emb_df = pd.read_csv(cptac_emb_path, index_col="bcr_patient_barcode")
 cptac_emb_df = cptac_emb_df[~cptac_emb_df.index.duplicated(keep="first")].copy()
 
@@ -98,7 +98,7 @@ cptac_patient_ids = merged_cptac["case_id"].tolist()
 print(f"CPTAC samples: {len(X_cptac)}, HRD+: {int(y_cptac.sum())}")
 
 all_predictions = []
-model_name = 'CNV_BERT_int'
+model_name = 'CNV_Hyena_int'
 
 for j in range(5):
     print(f"\n{'='*60}")
@@ -176,9 +176,9 @@ print("Saving predictions...")
 print(f"{'='*60}")
 
 predictions_df = pd.DataFrame(all_predictions)
-output_dir = "predictions_CNV_BERT_int/"
+output_dir = "predictions_CNV_Hyena_int/"
 os.makedirs(output_dir, exist_ok=True)
-output_path = os.path.join(output_dir, "predictions_CNV_BERT_int_all_folds.csv")
+output_path = os.path.join(output_dir, "predictions_CNV_Hyena_int_all_folds.csv")
 predictions_df.to_csv(output_path, index=False)
 print(f"Saved: {output_path}")
 print(f"Total predictions: {len(predictions_df)}")
@@ -186,7 +186,7 @@ print(f"Cohorts: {predictions_df['cohort'].unique().tolist()}")
 
 for cohort in predictions_df['cohort'].unique():
     cohort_df = predictions_df[predictions_df['cohort'] == cohort]
-    cohort_path = os.path.join(output_dir, f"predictions_CNV_BERT_int_{cohort}.csv")
+    cohort_path = os.path.join(output_dir, f"predictions_CNV_Hyena_int_{cohort}.csv")
     cohort_df.to_csv(cohort_path, index=False)
     print(f"Saved: {cohort_path} ({len(cohort_df)} samples)")
 
@@ -201,5 +201,5 @@ for cohort in predictions_df['cohort'].unique():
 print(f"\n{'='*60}")
 print("Next Step: Run evaluation pipeline")
 print(f"{'='*60}")
-print(f"python run_evaluation_pipeline.py --input {output_path} --output-dir evaluation_results_CNV_BERT_int/")
+print(f"python run_evaluation_pipeline.py --input {output_path} --output-dir evaluation_results_CNV_Hyena_int/")
 # %%
