@@ -8,24 +8,24 @@ def rescale_batch_weights(X, y, w):
 class Apply:
 
     class StratifiedMinibatch:
-        def __init__(self, batch_size, ds_size):
-            self.batch_size, self.ds_size = batch_size, ds_size
+        def __init__(self, batch_size, ds_size, reshuffle_each_iteration=True):
+            self.batch_size, self.ds_size, self.reshuffle_each_iteration = batch_size, ds_size, reshuffle_each_iteration
             # max number of splits
-            self.n_splits = self.ds_size // self.batch_size
+            self.n_splits = (self.ds_size // self.batch_size) + 1
             # stratified "mini-batch" via k-fold
-            self.batcher = StratifiedKFold(n_splits=self.n_splits, shuffle=True)
+            self.batcher = StratifiedKFold(n_splits=self.n_splits, shuffle=self.reshuffle_each_iteration)
 
         def __call__(self, ds_input: tf.data.Dataset):
             def generator():
-                # expecting ds of (idx, y_true, y_strat)
-                idx, y_true, y_strat = list(map(tf.stack, list(map(list, zip(*list(ds_input))))))
+                # expecting ds of (idx, y_strat)
+                idx, y_strat = list(map(tf.stack, list(map(list, zip(*list(ds_input))))))
                 while True:
                     for _, batch_idx in self.batcher.split(y_strat, y_strat):
-                        yield tf.gather(idx, batch_idx, axis=0), tf.gather(y_true, batch_idx, axis=0)
+                        yield tf.gather(idx, batch_idx, axis=0)
 
             return tf.data.Dataset.from_generator(generator,
-                                                  output_types=(ds_input.element_spec[0].dtype, ds_input.element_spec[1].dtype),
-                                                  output_shapes=((None, ), (None, ds_input.element_spec[1].shape[0])))
+                                                  output_types=(ds_input.element_spec[0].dtype),
+                                                  output_shapes=((None, )))
 
     class StratifiedBootstrap:
         def __init__(self, batch_class_sizes=[]):
@@ -35,8 +35,8 @@ class Apply:
 
         def __call__(self, ds_input: tf.data.Dataset):
             def generator():
-                # expecting ds of (idx, y_true, y_strat)
-                idx, y_true, y_strat = list(map(tf.stack, list(map(list, zip(*list(ds_input))))))
+                # expecting ds of (idx, y_strat)
+                idx, y_strat = list(map(tf.stack, list(map(list, zip(*list(ds_input))))))
                 assert (tf.reduce_max(y_strat).numpy() + 1) == len(self.batch_class_sizes)
                 class_idx = [tf.where(y_strat == i)[:, 0] for i in range(len(self.batch_class_sizes))]
                 while True:
@@ -47,11 +47,11 @@ class Apply:
                                                                                   dtype=tf.int64)))
                     batch_idx = tf.concat(batch_idx, axis=0)
 
-                    yield tf.gather(idx, batch_idx, axis=0), tf.gather(y_true, batch_idx, axis=0)
+                    yield tf.gather(idx, batch_idx, axis=0)
 
             return tf.data.Dataset.from_generator(generator,
-                                                  output_types=(ds_input.element_spec[0].dtype, ds_input.element_spec[1].dtype),
-                                                  output_shapes=((self.batch_size, ), (self.batch_size, ds_input.element_spec[1].shape[0])))
+                                                  output_types=(ds_input.element_spec[0].dtype),
+                                                  output_shapes=((self.batch_size)))
 
 
 
@@ -61,15 +61,16 @@ class Apply:
             self.ds_size = ds_size
         def __call__(self, ds_input: tf.data.Dataset):
             def generator():
-                # expecting ds of (idx, y_true)
-                idx, y_true = list(map(tf.stack, list(map(list, zip(*list(ds_input))))))
+                # expecting ds of idx
+                idx = tf.stack([element for element in ds_input])
                 while True:
                     batch_idx = np.random.choice(np.arange(self.ds_size), self.batch_size, replace=False)
-                    yield tf.gather(idx, batch_idx, axis=0), tf.gather(y_true, batch_idx, axis=0)
+                    yield tf.gather(idx, batch_idx, axis=0)
 
             return tf.data.Dataset.from_generator(generator,
-                                                  output_types=(ds_input.element_spec[0].dtype, ds_input.element_spec[1].dtype),
-                                                  output_shapes=((None, ), (None, ds_input.element_spec[1].shape[0])))
+                                                  output_types=(ds_input.element_spec.dtype),
+                                                  output_shapes=((None, )))
+
 
 
 class Map:
@@ -78,29 +79,43 @@ class Map:
         def loader(self):
             raise NotImplementedError
 
-        def __call__(self, sample_idx, ragged_output):
+        def __call__(self, sample_idx):
             # flat_values and additional_args together should be the input into the ragged_constructor of the loader
             flat_values, *additional_args = tf.py_function(self.loader, [sample_idx], self.tf_output_types)
             flat_values.set_shape((None,) + self.inner_shape)
 
-            if ragged_output:
+            if self.ragged_constructor:
                 return self.ragged_constructor(flat_values, *additional_args)
             else:
                 return flat_values
 
     class FromNumpy(LoadBatchByIndices):
-        def __init__(self, data, data_type):
+        def __init__(self, data, data_type, dropout=0):
             self.data = data
-            self.tf_output_types = [data_type, tf.int32]
-            self.inner_shape = data[0].shape[1:]
-            self.ragged_constructor = tf.RaggedTensor.from_row_lengths
+            if self.data.dtype == np.dtype('O'):
+                self.dropout = dropout
+                self.inner_shape = data[0].shape[1:]
+                self.tf_output_types = [data_type, tf.int32]
+                self.ragged_constructor = tf.RaggedTensor.from_row_lengths
+            else:
+                self.inner_shape = data.shape[1:]
+                self.tf_output_types = [data_type]
+                self.ragged_constructor = None
 
         def loader(self, idx):
-            batch = list()
-            for i in idx.numpy():
-                batch.append(self.data[i])
-            return np.concatenate(batch, axis=0), np.array([v.shape[0] for v in batch])
-        
+            if self.data.dtype == np.dtype('O'):
+                if self.dropout:
+                    batch = list()
+                    for i in idx.numpy():
+                        batch.append(self.data[i][np.random.random(len(self.data[i])) > self.dropout])
+                    return np.concatenate(batch, axis=0), np.array([v.shape[0] for v in batch])
+                else:
+                    batch = self.data[idx.numpy()]
+                    return np.concatenate(batch, axis=0), np.array([v.shape[0] for v in batch])
+
+            else:
+                return self.data[idx.numpy()]
+
     class LoadIndices:
         def loader(self):
             raise NotImplementedError

@@ -150,16 +150,17 @@ class Ragged:
             return tf.ragged.map_flat_values(self.activation_layer, ragged_dot)
 
     class Attention(tf.keras.layers.Layer):
-        def __init__(self, pooling='sum', regularization=.2, layers=[16, ]):
+        def __init__(self, pooling='sum', regularization=.2, layers=[16, ], heads=1):
             super(Ragged.Attention, self).__init__()
             self.pooling = pooling
             self._supports_ragged_inputs = True
             self.layers = layers
+            self.heads = heads
             self.regularization = regularization
             self.attention_layers = []
             for i in layers:
                 self.attention_layers.append(tf.keras.layers.Dense(units=i, activation='relu'))
-            self.attention_layers.append(tf.keras.layers.Dense(units=1, activation=Activations.ASU(), activity_regularizer=tf.keras.regularizers.l1(regularization)))
+            self.attention_layers.append(tf.keras.layers.Dense(units=self.heads, activation=Activations.ASU(), activity_regularizer=tf.keras.regularizers.l1(regularization)))
 
         def call(self, inputs, **kwargs):
             if self.pooling == 'dynamic':

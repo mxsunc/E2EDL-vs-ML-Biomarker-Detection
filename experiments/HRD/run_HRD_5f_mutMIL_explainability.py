@@ -6,6 +6,8 @@ from mutationMIL.KerasLayers import Losses, Metrics
 from mutationMIL import DatasetsUtils
 import pandas as pd
 import pickle
+import os
+import random
 from matplotlib.colors import LinearSegmentedColormap, mcolors
 from sklearn.manifold import TSNE
 import umap
@@ -14,11 +16,19 @@ from tensorflow.keras.models import Model
 from sklearn.cluster import KMeans
 from helpers.mutation_classification import generate_mutation_classes, decode_sequence, classify_mutations, decode_sequence, reverse_complement, classify_indels_detailed, plot_sequence_logos_for_cluster
 
+# Set global seeds
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+tf.random.set_seed(SEED)
+os.environ['PYTHONHASHSEED'] = str(SEED)
+
 physical_devices = tf.config.experimental.list_physical_devices('GPU')
 tf.config.experimental.set_memory_growth(physical_devices[-1], True)
 tf.config.experimental.set_visible_devices(physical_devices[-1], 'GPU')
 
-cwd = "..." 
+cwd = "..."
+WEIGHTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "weights", "HRD")
 
 D, samples, sample_df = pickle.load(open(cwd + '/controlled_filters_combined_HRD_data_finished_20_pos.pkl', 'rb'))
 
@@ -52,6 +62,7 @@ samples_list = sample_df['bcr_patient_barcode'].tolist()
 
 callbacks = [tf.keras.callbacks.EarlyStopping(monitor='val_BE', min_delta=0.002, patience=80, mode='min', restore_best_weights=True)]
 losses = [Losses.BinaryCrossEntropy(from_logits=True)]
+dropout = 0.5
 sequence_encoder = InstanceModels.VariantSequence(20, 4, 2, [8, 8, 8, 8], fusion_dimension=128)
 mil = RaggedModels.MIL(instance_encoders=[sequence_encoder.model], sample_encoders=[], heads=y_label.shape[-1], mil_hidden=(256, 128), attention_layers=[], dropout=.5, instance_dropout=.5, regularization=.05, input_dropout=dropout)
 mil.model.compile(loss=losses,
@@ -59,7 +70,7 @@ mil.model.compile(loss=losses,
                           optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001))
 
 loaded_weights = []
-with open(cwd+'/HRD_20_model_weights_fold1.pkl', 'rb') as f:
+with open(os.path.join(WEIGHTS_DIR, 'HRD_attMIL_weights_fold1.pkl'), 'rb') as f:
         loaded_weights.append(pickle.load(f))
 mil.model.set_weights(loaded_weights[0])
 

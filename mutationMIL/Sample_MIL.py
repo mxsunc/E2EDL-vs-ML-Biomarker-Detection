@@ -1,5 +1,5 @@
 import tensorflow as tf
-from model.KerasLayers import Activations, Ragged, Embed, StrandWeight, Dropout
+from mutationMIL.KerasLayers import Activations, Ragged, Embed, StrandWeight, Dropout
 
 class InstanceModels:
 

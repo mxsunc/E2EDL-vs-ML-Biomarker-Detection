@@ -6,6 +6,8 @@ from mutationMIL.KerasLayers import Losses, Metrics
 from mutationMIL import DatasetsUtils
 import pandas as pd
 import pickle
+import os
+import random
 from matplotlib.colors import LinearSegmentedColormap, mcolors
 from sklearn.manifold import TSNE
 import umap
@@ -14,11 +16,18 @@ from tensorflow.keras.models import Model
 from sklearn.cluster import KMeans
 from helpers.mutation_classification import generate_mutation_classes, decode_sequence, classify_mutations, decode_sequence, reverse_complement, classify_indels_detailed, plot_sequence_logos_for_cluster
 
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+tf.random.set_seed(SEED)
+os.environ['PYTHONHASHSEED'] = str(SEED)
+
 physical_devices = tf.config.experimental.list_physical_devices('GPU')
 tf.config.experimental.set_memory_growth(physical_devices[-1], True)
 tf.config.experimental.set_visible_devices(physical_devices[-1], 'GPU')
 
-cwd = "..." 
+cwd = "..."
+WEIGHTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "weights", "MSI")
 dropout = 0.4
 D, samples, sample_df = pickle.load(open(cwd + '/controlled_filters_multi_msi_consensus_data_finished_20_pos.pkl', 'rb'))
 
@@ -59,7 +68,7 @@ mil.model.compile(loss=losses,
                           optimizer=tf.keras.optimizers.Adam(learning_rate=0.001))
 
 loaded_weights = []
-with open(cwd+'/MSI_filters_20_model_weights_fold4.pkl', 'rb') as f:
+with open(os.path.join(WEIGHTS_DIR, 'MSI_attMIL_weights_fold4.pkl'), 'rb') as f:
         loaded_weights.append(pickle.load(f))
 mil.model.set_weights(loaded_weights[0])
 
@@ -68,7 +77,7 @@ cancer_positions =[]
 cancer_features_norm = []
 cancer_features_notnorm = []
 mutation_attention = []
-# set the layers that encodes single mutations to get mutation level features
+
 model_feature = Model(inputs=mil.model.inputs, outputs=mil.model.layers[-11].output)
 ds_all = tf.data.Dataset.from_tensor_slices((np.unique(D["sample_idx"]), y_label))
 ds_all = ds_all.batch(len(y_label), drop_remainder=False)
@@ -84,11 +93,9 @@ ds_all = ds_all.batch(len(np.unique(D["sample_idx"])), drop_remainder=False)
 # get features
 features = model_feature.predict(ds_all).flat_values.numpy()
 
-# get corresponfing attention values
 attention_scores = mil.attention_model.predict(ds_all).flat_values.numpy()
 attention_scores_flat = np.array([item for sublist in attention_scores for item in sublist])
 
-# select 5000 random mutations 
 if len(features) > 5000:
         selected_indices = np.random.choice(len(features), 5000, replace=False)
         features = features[selected_indices]
@@ -102,14 +109,12 @@ max_vals = features.max(axis=0)
 features_normalized = (features - min_vals) / (max_vals - min_vals + 1e-5)
 cancer_features_norm.append(features_normalized)
 
-# get sequences of each block 
 top_five_sequences = np.array(D['seq_5p'])[selected_indices]
 top_three_sequences = np.array(D['seq_3p'])[selected_indices]
 top_reference_sequences = np.array(D['seq_ref'])[selected_indices]
 top_alteration_sequences = np.array(D['seq_alt'])[selected_indices]
 top_positions = np.array(D['pos_float'])[selected_indices]
 
-# deconde numbers into letters
 decoded_five_sequences = decode_sequence(top_five_sequences)
 decoded_three_sequences = decode_sequence(top_three_sequences)
 decoded_reference = decode_sequence(top_reference_sequences)
@@ -142,18 +147,15 @@ indel_indices = [
     if all(char == '-' for char in ref) or all(char == '-' for char in alt)
 ]
 
-# filter mutation features and attention values for indels
 indel_mutation_features = [all_mutation_features[i] for i in indel_indices]
 indel_mutation_attention = all_mutation_attention[indel_indices]
 
-# filter sequences for visualization or further analysis
 indel_five_sequences = [five_sequences[i] for i in indel_indices]
 indel_three_sequences = [three_sequences[i] for i in indel_indices]
 indel_ref_sequences = [ref_sequences[i] for i in indel_indices]
 indel_alt_sequences = [alt_sequences[i] for i in indel_indices]
 indel_positions = [posinces[i] for i in indel_indices]
 
-# heatmap of mutation features
 colors = ["white","#83c7e9","#185d85", "#bc1e2d", "#f4969d"]
 cmap_name = 'custom_coolwarm'
 custom_coolwarm = LinearSegmentedColormap.from_list(cmap_name, colors)
@@ -169,7 +171,6 @@ plt.gca().patch.set_alpha(0)
 plt.tight_layout()
 plt.show()
 
-#cluster features
 kmeans = KMeans(n_clusters=7, random_state=42)
 clusters = kmeans.fit_predict(features_array)
 five_prime_ends_array = np.array(five_sequences)
@@ -186,7 +187,6 @@ sorted_clusters = np.zeros_like(clusters)
 for new_order, cluster_id in enumerate(clusters_order):
     sorted_clusters[clusters == cluster_id] = new_order
 
-# sort features by cluster
 sort_idx = np.argsort(sorted_clusters)
 sorted_features_array = features_array[sort_idx]
 sorted_five_prime_ends = five_prime_ends_array[sort_idx]
@@ -207,7 +207,6 @@ for i in range(length_of_sorted_features_array):
     else:
         cluster_assignment.append(cluster_number + 1)
 
-# heatmap of clustered mutation features
 plt.figure(figsize=(7.5, 6))
 plt.rcParams['figure.dpi'] = 600
 plt.imshow(sorted_features_array, aspect='auto', alpha = 0.9,cmap = custom_coolwarm)  
@@ -239,7 +238,6 @@ mutation_attention_by_cluster = np.split(sorted_mutation_attention, final_bounda
 
 cluster_dataframes = []
 for i in range(len(features_by_cluster)):
-    # Prepare a dictionary to hold data for DataFrame creation
     data = {
         "5_prime": five_prime_ends_by_cluster[i],
         "3_prime": three_prime_ends_by_cluster[i],
@@ -265,10 +263,8 @@ for cluster_index in range(len(cluster_dataframes)):
         alt_seqs = cluster_dataframes[cluster_index]["alt"]
         three_prime_seqs = cluster_dataframes[cluster_index]["3_prime"]
 
-        # plot seuqence logos for the cluster separated by sequence block
         plot_sequence_logos_for_cluster('cancer_name',0,five_prime_seqs, ref_seqs, alt_seqs, three_prime_seqs)
 
-        # classify mutations
         sbs_mutations = []
         for x in range(len(five_prime_seqs)):
             five_prime = five_prime_seqs[x][-1] 
@@ -280,7 +276,6 @@ for cluster_index in range(len(cluster_dataframes)):
 
         cluster_dataframes[cluster_index]["mutation_class"] = ["SBS" if x != 'Other' else "InDel" for x in sbs_mutations]
 
-        # separate mutations by SBSs and indels
         df_sbs = cluster_dataframes[cluster_index][cluster_dataframes[cluster_index]['mutation_class'] == 'SBS'].iloc[:, :]
         df_indel = cluster_dataframes[cluster_index][cluster_dataframes[cluster_index]['mutation_class'] == 'InDel'].iloc[:, :]
 
@@ -309,7 +304,6 @@ for cluster_index in range(len(cluster_dataframes)):
             count = count / len(sbs_mutations)
             mutation_dict[mutation_class] = count
             
-        # plot SBS features for each cluster
         plt.rcParams['figure.dpi'] = 600
         colors = ['#42c2f5'] * 16 + ['black'] * 16 + ['#b51626'] * 16 + ['lightgrey'] * 16 + ['#a4d466'] * 16 + ['#e8b0b4'] * 16
         plt.figure(figsize=(13, 2))
@@ -336,7 +330,7 @@ for cluster_index in range(len(cluster_dataframes)):
                 fontsize=8,
                 rotation=90
             )
-            # overlay the middle letter with its specific color
+
             plt.text(
                 x_position, y_position-0.0007,
                 " "+middle_letter+" ",
@@ -352,7 +346,6 @@ for cluster_index in range(len(cluster_dataframes)):
         plt.show()
         plt.close()
 
-        # plot indel features for each cluster
         colors_indels = ["#fcbe6e","#fd7f03","#afda87","#3a9e33","#fcc9b5","#fb8969","#f04435","#b51d18","#d0dfef","#93c2e1","#4c95c7","#1961aa","#e3e2ea", "#b2b5d9", "#8784b9", "#614199"] # 16 colors
         indel_mutation_dict = classify_indels_detailed(df_indel["5_prime"],df_indel["ref"],df_indel["alt"],df_indel["3_prime"],(len(df_sbs)+len(df_indel)))
 
